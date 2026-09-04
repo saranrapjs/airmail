@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,9 +9,10 @@ use log::{trace, warn};
 use s2::region::RegionCoverer;
 use std::collections::BTreeMap;
 use tantivy::schema::Value;
+#[cfg(not(target_arch = "wasm32"))]
+use tantivy::directory::MmapDirectory;
 use tantivy::{
     collector::{Count, TopDocs},
-    directory::MmapDirectory,
     query::{
         BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query,
         TermQuery,
@@ -21,7 +23,9 @@ use tantivy::{
     },
     Searcher, TantivyDocument, Term,
 };
+#[cfg(target_os = "linux")]
 use tantivy_uffd::RemoteDirectory;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -30,6 +34,30 @@ use crate::{
     poi::{AirmailPoi, SchemafiedPoi},
     query::all_subsequences,
 };
+
+/// Runs a synchronous, potentially expensive closure without blocking the
+/// async task driving it. Off wasm32 this offloads to tokio's blocking
+/// thread pool, since tantivy's `Searcher`/`IndexReader` APIs are
+/// synchronous. wasm32-unknown-unknown has no OS threads to offload to (and,
+/// running inside a single-threaded Worker, nothing else to block), so there
+/// it just calls the closure directly.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_blocking<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    Ok(spawn_blocking(f).await?)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::unused_async)]
+async fn run_blocking<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T,
+{
+    Ok(f())
+}
 
 // Field name keys.
 pub const FIELD_CONTENT: &str = "content";
@@ -111,6 +139,7 @@ impl AirmailIndex {
         self.tantivy_index.schema().get_field(FIELD_TAGS).unwrap()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create(index_dir: &Path) -> Result<Self> {
         if !index_dir.exists() {
             trace!("Creating index at {:?}", index_dir);
@@ -127,6 +156,18 @@ impl AirmailIndex {
         })
     }
 
+    /// An in-memory index with no persisted backing storage. Doesn't need
+    /// `mmap` (so it's available on wasm32), primarily useful for tests and
+    /// for probing the size/behavior of the search path in isolation.
+    pub fn create_in_ram() -> Result<Self> {
+        let tantivy_index = tantivy::Index::create_in_ram(Self::schema());
+        Ok(Self {
+            tantivy_index: Arc::new(tantivy_index),
+            is_remote: false,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(index_dir: &str) -> Result<Self> {
         let tantivy_index = tantivy::Index::open_in_dir(index_dir)?;
         Ok(Self {
@@ -135,6 +176,20 @@ impl AirmailIndex {
         })
     }
 
+    /// Opens an index backed by an arbitrary tantivy `Directory` -- e.g. a
+    /// custom, non-mmap `Directory` implementation such as an OPFS- or
+    /// browser-storage-backed one, for platforms where `new()`/`create()`
+    /// (which require the `mmap` feature) aren't available or aren't the
+    /// right storage model.
+    pub fn open(directory: impl Into<Box<dyn tantivy::Directory>>) -> Result<Self> {
+        let tantivy_index = tantivy::Index::open(directory)?;
+        Ok(Self {
+            tantivy_index: Arc::new(tantivy_index),
+            is_remote: false,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn new_remote(base_url: &str) -> Result<Self> {
         let tantivy_index =
             tantivy::Index::open(RemoteDirectory::<{ 2 * 1024 * 1024 }>::new(base_url))?;
@@ -166,14 +221,15 @@ impl AirmailIndex {
 
     pub async fn num_docs(&self) -> Result<u64> {
         let index = self.tantivy_index.clone();
-        let count = spawn_blocking(move || {
+        let count = run_blocking(move || {
             if let Ok(tantivy_reader) = index.reader() {
                 Some(tantivy_reader.searcher().num_docs())
             } else {
                 None
             }
-        });
-        Ok(count.await?.ok_or(AirmailError::UnableToCount)?)
+        })
+        .await?;
+        Ok(count.ok_or(AirmailError::UnableToCount)?)
     }
 
     async fn construct_query(
@@ -214,6 +270,7 @@ impl AirmailIndex {
                 boost *= 3.0;
             }
             if subsequence.len() > 1 {
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.is_remote {
                     let searcher = searcher.clone();
                     let subsequence = subsequence.clone();
@@ -258,6 +315,7 @@ impl AirmailIndex {
                 } else {
                     FuzzyTermQuery::new(term, 1, true)
                 };
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.is_remote {
                     let searcher = searcher.clone();
                     let query = query.clone();
@@ -273,6 +331,7 @@ impl AirmailIndex {
                     } else {
                         Box::new(FuzzyTermQuery::new_prefix(term, 0, false))
                     };
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.is_remote {
                     let searcher = searcher.clone();
                     let query = query.box_clone();
@@ -350,6 +409,10 @@ impl AirmailIndex {
         let searcher = tantivy_reader.searcher();
         let query_string = query.trim().replace("'s", "s");
 
+        // std::time::Instant::now() panics on wasm32-unknown-unknown (no
+        // clock source without JS glue); it's only used for a trace log
+        // below, so just skip timing there.
+        #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
 
         let query = self
@@ -367,7 +430,7 @@ impl AirmailIndex {
         trace!("Search query: {:?}", &query);
 
         // Perform the search and then resolve the returned documents
-        let top_docs: Result<Vec<(f32, TantivyDocument)>> = spawn_blocking(move || {
+        let top_docs: Result<Vec<(f32, TantivyDocument)>> = run_blocking(move || {
             let doc_addresses = searcher.search(&query, &TopDocs::with_limit(10))?;
             let mut docs = vec![];
             for (score, doc_address) in doc_addresses {
@@ -385,6 +448,7 @@ impl AirmailIndex {
             e
         })?;
 
+        #[cfg(not(target_arch = "wasm32"))]
         trace!(
             "Search took {:?} and yielded {} results",
             start.elapsed(),

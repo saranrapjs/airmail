@@ -48,4 +48,31 @@ Option 2: `chcon -t container_file_t ./data/whosonfirst-data-admin-us-latest.spa
 
 `podman run --rm --name airmail-service -p 3000:3000 -v $PWD/index:/var/airmail/index:Z airmail_service --index /var/airmail/index`
 
+## Building the wasm target (airmail_wasm)
+
+`airmail_wasm` is a POC, not a shipping artifact yet -- these steps produce a Node-usable build for `airmail_wasm/test/node_test.cjs`. Install `wasm-bindgen-cli` (version must match the `wasm-bindgen` crate version in Cargo.lock, currently 0.2.92) and `wasm-opt` (from [binaryen](https://github.com/WebAssembly/binaryen)) first.
+
+Compile to wasm32:
+
+```
+cargo build --release --target wasm32-unknown-unknown -p airmail_wasm
+```
+
+Generate JS bindings (output goes to `airmail_wasm/pkg-node/`, gitignored):
+
+```
+wasm-bindgen --target nodejs --out-dir airmail_wasm/pkg-node \
+  target/wasm32-unknown-unknown/release/airmail_wasm.wasm
+```
+
+Post-process for size:
+
+```
+wasm-opt -Oz --enable-nontrapping-float-to-int --enable-bulk-memory --strip-debug \
+  -o airmail_wasm/pkg-node/airmail_wasm_bg.wasm \
+  airmail_wasm/pkg-node/airmail_wasm_bg.wasm
+```
+
+Then run the Node test harness: `node airmail_wasm/test/node_test.cjs <index-dir> <query>`
+
 

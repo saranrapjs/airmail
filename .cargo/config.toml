@@ -1,0 +1,13 @@
+# Strip debug info for the wasm32 target specifically: the workspace's own
+# [profile.release] debug = 1 (in the root Cargo.toml, used for native
+# backtraces) otherwise bloats the .wasm binary substantially, and there's
+# no reason to carry debug info into a browser/Node payload.
+#
+# CC_wasm32_unknown_unknown / AR_wasm32_unknown_unknown are NOT set here on
+# purpose: Apple's Xcode clang has no WebAssembly backend, so building for
+# wasm32 (e.g. airmail_wasm, or any crate with a C dependency like zstd-sys)
+# needs a wasm32-capable clang/ar (e.g. Homebrew's llvm) pointed to via
+# those two env vars -- but the right path is machine-specific, so set them
+# in your own shell profile rather than here.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "debuginfo=0", "-C", "strip=symbols"]

@@ -1,7 +1,7 @@
 use anyhow::Result;
-use lingua::Language;
 use serde::{Deserialize, Serialize};
 
+use crate::language::Language;
 use crate::substitutions::permute_road;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

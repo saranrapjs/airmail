@@ -7,51 +7,67 @@ edition = "2021"
 
 [dependencies]
 levenshtein_automata = "0.2.1"
-s2 = "0.0.12"
-tantivy = "0.22.0"
+s2 = "0.2.0"
+# "mmap" (native filesystem-backed Directory, pulled in by tantivy's default
+# features) drags in fs4/rustix, which don't support wasm32-unknown-unknown
+# and aren't useful there anyway -- wasm builds open a custom, non-mmap
+# Directory instead. Re-added for non-wasm32 targets below.
+tantivy = { version = "0.22.0", default-features = false, features = [
+    "stopwords",
+    "lz4-compression",
+] }
 tantivy-common = "0.7.0"
 tantivy-fst = "0.4.0"
 tempfile = "3.9.0"
 log = "0.4.20"
 serde_json = "1"
 serde = { version = "1", features = ["derive"] }
-reqwest = { version = "0.11.24", features = ["blocking"] }
 lru = "0.12.2"
 async-trait = "0.1.77"
-tokio = { version = "1.36.0", features = ["full"] }
-nix = { version = "0.27", features = ["ioctl", "mman"] }
-userfaultfd = { version = "0.8.1", features = ["linux4_14", "linux5_7"] }
+# "full" (net/process/signal/the multi-thread runtime, all backed by mio) is
+# only meaningful with real OS threads and sockets. wasm32-unknown-unknown
+# has neither; it only needs enough of tokio to run async fns to completion
+# and (via run_blocking, see index.rs) macros for that. Re-added for
+# non-wasm32 targets below.
+tokio = { version = "1.36.0", default-features = false, features = ["macros"] }
 futures-util = "0.3.30"
 deunicode = "1.4.3"
 itertools = "0.12.1"
-lingua = { version = "1.6.2", default-features = false, features = [
-    "english",
-    "chinese",
-    "catalan",
-    "arabic",
-    "danish",
-    "dutch",
-    "finnish",
-    "french",
-    "german",
-    "greek",
-    "hungarian",
-    "italian",
-    "portuguese",
-    "romanian",
-    "russian",
-    "spanish",
-    "swedish",
-    "tamil",
-    "turkish",
-] }
+# No `lingua` dependency here: `airmail` never runs lingua's statistical
+# language *detection* (only `airmail_indexer` does, at import time). It
+# only ever needed a handful of `Language` variants to pick a street-type
+# substitution dictionary (see substitutions.rs), which is now served by a
+# local `language::Language` enum instead. Each per-language lingua Cargo
+# feature pulls in several MB of bundled n-gram model data into any binary
+# depending on lingua with that feature on, whether or not the detector is
+# ever built, so this removes that entirely from airmail's own compiled
+# surface (airmail_indexer keeps its own, separate, full lingua dependency
+# for admin-area detection, and maps its richer language type down to
+# airmail's at the crate boundary).
 unicode-segmentation = "1.11.0"
 lazy_static = "1.4.0"
 regex = "1.10.3"
 geo = "0.27.0"
-tantivy-uffd = "0.1.1"
 anyhow = "1.0.86"
 thiserror = "1.0.63"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tantivy = { version = "0.22.0", default-features = false, features = ["mmap"] }
+tokio = { version = "1.36.0", features = ["full"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+# transitively required by ahash/uuid/etc.; wasm32-unknown-unknown has no OS
+# RNG source, so the "js" feature routes it through the browser's crypto API.
+getrandom = { version = "0.2", features = ["js"] }
+
+# tantivy-uffd's RemoteDirectory pages index data in over HTTP using Linux's
+# userfaultfd syscall, so it (and the nix/userfaultfd crates it pulls in) can
+# only ever build on Linux -- not on macOS/Windows hosts, and not on wasm32.
+[target.'cfg(target_os = "linux")'.dependencies]
+reqwest = { version = "0.11.24", features = ["blocking"] }
+nix = { version = "0.27", features = ["ioctl", "mman"] }
+userfaultfd = { version = "0.8.1", features = ["linux4_14", "linux5_7"] }
+tantivy-uffd = "0.1.1"
 
 [features]
 remote_index = ["tantivy/quickwit"]

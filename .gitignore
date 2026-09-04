@@ -16,3 +16,8 @@ perf.data*
 # Suggested paths for data and index
 data/
 index/
+
+# wasm-bindgen CLI output, regenerated from airmail_wasm's compiled .wasm
+# (see airmail_wasm/test/node_test.cjs for how to regenerate)
+airmail_wasm/pkg-node/
+airmail_wasm/pkg/
