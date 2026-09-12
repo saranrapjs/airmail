@@ -102,10 +102,15 @@ impl AirmailIndex {
         );
         let s2cell_parent_index_options = NumericOptions::default().set_indexed();
         // EXPERIMENT: s2cell (the exact per-doc cell) is only ever read back
-        // via the stored/fast value (see field_s2cell() call sites) -- it's
-        // never used in a TermQuery, so .set_indexed() here was ~2M (NY)
-        // more near-unique dead terms in the term dictionary for no reason.
-        let s2cell_index_options = NumericOptions::default().set_stored().set_fast();
+        // via the stored value (see field_s2cell() call sites, which all go
+        // through doc.get_first() on a TantivyDocument pulled from the doc
+        // store) -- it's never used in a TermQuery (so .set_indexed() here
+        // was ~2M (NY) more near-unique dead terms in the term dictionary
+        // for no reason) and, checked across the whole codebase, nothing
+        // ever reads it via a fast-field reader either -- .set_fast() was a
+        // second, columnar copy of the same 8 bytes/doc that's already in
+        // the doc store, paid for and never read.
+        let s2cell_index_options = NumericOptions::default().set_stored();
         assert!(!s2cell_parent_index_options.fieldnorms());
         assert!(!s2cell_index_options.fieldnorms());
 
@@ -161,8 +166,35 @@ impl AirmailIndex {
 
         trace!("Opening index at {:?}", index_dir);
         let schema = Self::schema();
-        let tantivy_index =
-            tantivy::Index::open_or_create(MmapDirectory::open(index_dir)?, schema)?;
+        // EXPERIMENT: default docstore compression is lz4, gzip'd again on
+        // top for delivery -- but gzip only found ~20% more in lz4's output
+        // (most of the entropy was already gone), while zstd-19 does that
+        // work upfront, leaving gzip almost nothing to find (measured:
+        // ~14% smaller gzip'd index on NYC, isolated to this one setting).
+        // First attempt at this shipped it native-only (see
+        // airmail_wasm/Cargo.toml's "zstd-compression" comment for why a
+        // wasm32 build needs its own copy of this cargo feature, and how
+        // it was verified) -- fixed now, both native and wasm32 read this
+        // correctly.
+        let settings = tantivy::IndexSettings {
+            docstore_compression: tantivy::store::Compressor::Zstd(
+                tantivy::store::ZstdCompressor {
+                    compression_level: Some(19),
+                },
+            ),
+            // EXPERIMENT: default block size (16KiB) only holds ~800 of
+            // these very short (tags + s2cell) docs per block, so the
+            // compressor rarely sees repeated street/city/borough names
+            // from doc to doc. A larger block gives it far more
+            // cross-document context to dedupe against. Not gated behind
+            // any cargo feature, so no wasm-side caveat here.
+            docstore_blocksize: 1 << 17,
+            ..Default::default()
+        };
+        let tantivy_index = tantivy::Index::builder()
+            .schema(schema)
+            .settings(settings)
+            .open_or_create(MmapDirectory::open(index_dir)?)?;
         Ok(Self {
             tantivy_index: Arc::new(tantivy_index),
             is_remote: false,

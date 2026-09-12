@@ -52,7 +52,7 @@ anyhow = "1.0.86"
 thiserror = "1.0.63"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-tantivy = { version = "0.22.0", default-features = false, features = ["mmap"] }
+tantivy = { version = "0.22.0", default-features = false, features = ["mmap", "zstd-compression"] }
 tokio = { version = "1.36.0", features = ["full"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

@@ -20,6 +20,22 @@ publish = false
 # open indexes built by an unmodified `indexer` invocation -- without it,
 # opening a real index fails with "Unsuported dictionary type, expected 1,
 # found 2" (FST reader, SSTable file).
+#
+# "zstd-compression" matches airmail's `AirmailIndex::create()`, which now
+# builds indexes with a zstd-19 doc store (see index.rs) instead of
+# tantivy's lz4 default -- ~14% smaller gzip'd index, measured on NYC.
+# Without this feature here, opening such an index fails identically to the
+# quickwit case above: Index::open() errors deserializing meta.json,
+# "unsupported variant `zstd`, please enable Tantivy's `zstd-compression`
+# feature". Verified this compiles and links for wasm32-unknown-unknown
+# (zstd-sys's C source needs a wasm-capable C compiler -- CC_wasm32_unknown_unknown
+# must point at one, e.g. Homebrew LLVM's clang) and adds ~0.05% to the
+# final gzip'd .wasm size: only the decompression path is ever reachable
+# here, since create() -- the only caller of the zstd *compressor* -- is
+# `#[cfg(not(target_arch = "wasm32"))]` and isn't part of this build at all.
+# Confirmed via node_test.cjs: opens and searches both zstd- and
+# lz4-compressed indexes correctly (this feature is additive, not a format
+# switch -- lz4 indexes keep working).
 
 [lib]
 crate-type = ["cdylib"]
@@ -30,6 +46,7 @@ tantivy = { version = "0.22.0", default-features = false, features = [
     "stopwords",
     "lz4-compression",
     "quickwit",
+    "zstd-compression",
 ] }
 tantivy-common = "0.7.0"
 serde_json = "1"
