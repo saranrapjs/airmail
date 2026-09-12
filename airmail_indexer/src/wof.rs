@@ -63,6 +63,17 @@ impl WhosOnFirst {
                     AND place.type != 'marketarea'
                     AND place.type != 'county'
                     AND place.type != 'timezone'
+                    -- EXPERIMENT: these placetypes are geographically real but
+                    -- contribute zero address-search value while still fully
+                    -- multiplying through query_names' per-admin-id x
+                    -- per-language name lookup below. Verified directly
+                    -- against this WOF db for a Times Square point: 'ocean'
+                    -- (Atlantic Ocean) and 'continent' (North America) each
+                    -- contributed 17 language-variant name strings indexed
+                    -- into every nearby doc's content field.
+                    AND place.type != 'ocean'
+                    AND place.type != 'continent'
+                    AND place.type != 'empire'
                 )
                 LIMIT 1000
             ",
@@ -88,10 +99,15 @@ impl WhosOnFirst {
                 WHERE name.source = 'wof'
                 AND name.id = ?1
                 AND name.tag IN ('preferred', 'default')
-                AND name.lang IN (
-                    'ara', 'dan', 'deu', 'fra', 'fin', 'hun', 'gre', 'ita', 'nld', 'por',
-                    'rus', 'ron', 'spa', 'eng', 'swe', 'tam', 'tur', 'zho'
-                )
+                -- EXPERIMENT: was all 18 WOF-supported languages, meaning
+                -- every admin polygon a point falls in (borough, region,
+                -- locality, neighbourhood, ...) contributed up to 18
+                -- language variants of its name into every doc's content
+                -- field. Narrowed to English only to measure the ceiling of
+                -- this lever; a real deployment would likely want English +
+                -- whatever languages the target market's users search in
+                -- (e.g. + 'spa' for NYC).
+                AND name.lang IN ('eng')
             ",
         )
         .bind(id)

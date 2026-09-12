@@ -84,14 +84,22 @@ impl From<ToIndexPoi> for SchemafiedPoi {
             }
         }
         content.extend(poi.unit);
-        content.extend(poi.admins);
+        // ADOPTED: admin-hierarchy names (borough/region/locality/...)
+        // dropped from content. Verified: a named POI (e.g. Times Square)
+        // matches on its own name; a bare address matches on
+        // house_number+road -- neither depends on this. What it costs is
+        // browse-by-neighbourhood (e.g. "Theater District" alone matching
+        // an unnamed POI nearby) -- accepted for a routing-to-specific-
+        // places use case. -16.5% further, see report section 04.
+        let _ = &poi.admins;
 
-        let mut s2cell_parents = Vec::new();
-        let cell = s2::cellid::CellID(poi.s2cell);
-        for level in 0..cell.level() {
-            let cell = cell.parent(level);
-            s2cell_parents.push(cell.0);
-        }
+        // ADOPTED: routeman's wasm search path (search.worker.ts ->
+        // search_index -> AirmailIndex::search(query, true, None, None, &[]))
+        // hardcodes bbox=None -- construct_query's entire covering_cells
+        // block is gated on `if let Some(bbox) = bbox`, so it's unreachable
+        // for that call site. s2cell_parents is never term-matched by any
+        // query this app actually issues; left empty rather than computed.
+        let s2cell_parents = Vec::new();
 
         Self {
             content,

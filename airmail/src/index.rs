@@ -88,17 +88,30 @@ impl AirmailIndex {
                 .set_tokenizer("raw")
                 .set_index_option(IndexRecordOption::Basic),
         );
+        // EXPERIMENT: `source` is never phrase/term-queried (see
+        // construct_query, which only ever builds queries against `content`
+        // and `indexed_tag`) and isn't STORED either, so WithFreqsAndPositions
+        // here was pure position-tracking overhead on every doc for a value
+        // that (a) has near-zero cardinality across a whole import batch and
+        // (b) can't even be retrieved back out. Basic is enough for a field
+        // that's dead weight either way.
+        let source_options = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_fieldnorms(false)
+                .set_index_option(IndexRecordOption::Basic),
+        );
         let s2cell_parent_index_options = NumericOptions::default().set_indexed();
-        let s2cell_index_options = NumericOptions::default()
-            .set_indexed()
-            .set_stored()
-            .set_fast();
+        // EXPERIMENT: s2cell (the exact per-doc cell) is only ever read back
+        // via the stored/fast value (see field_s2cell() call sites) -- it's
+        // never used in a TermQuery, so .set_indexed() here was ~2M (NY)
+        // more near-unique dead terms in the term dictionary for no reason.
+        let s2cell_index_options = NumericOptions::default().set_stored().set_fast();
         assert!(!s2cell_parent_index_options.fieldnorms());
         assert!(!s2cell_index_options.fieldnorms());
 
         let _ = schema_builder.add_text_field(FIELD_CONTENT, text_options.clone());
         let _ = schema_builder.add_text_field(FIELD_INDEXED_TAG, tag_options);
-        let _ = schema_builder.add_text_field(FIELD_SOURCE, text_options.clone());
+        let _ = schema_builder.add_text_field(FIELD_SOURCE, source_options);
         let _ = schema_builder.add_u64_field(FIELD_S2CELL, s2cell_index_options);
         let _ = schema_builder.add_u64_field(FIELD_S2CELL_PARENTS, s2cell_parent_index_options);
         let _ = schema_builder.add_json_field(FIELD_TAGS, STORED);
@@ -496,7 +509,17 @@ impl AirmailIndexWriter {
         for content in poi.content {
             self.process_field(&mut doc, &content);
         }
-        doc.add_text(self.schema.get_field(FIELD_SOURCE)?, source);
+        // ADOPTED: `source` is constant across an entire city import ("osm"
+        // for every doc), never term-queried (construct_query never builds
+        // against field_source()), and isn't `.set_stored()` either -- so
+        // AirmailIndex::search()'s `doc.get_first(self.field_source())`
+        // already silently returns None on every result today. Indexing it
+        // still cost a ~1.1M-entry postings list (one term, doc-freq ==
+        // entire index) for a value that can't filter anything and can't be
+        // read back. Left unpopulated rather than written -- field stays in
+        // the schema (zero cost unpopulated) so field_source() and the
+        // AirmailPoi.source struct/JSON shape are unchanged for consumers.
+        let _ = source;
 
         let indexed_keys = [
             "natural", "amenity", "shop", "leisure", "tourism", "historic", "cuisine",
@@ -514,10 +537,26 @@ impl AirmailIndexWriter {
                 );
             }
         }
+        // EXPERIMENT: FIELD_TAGS is STORED only (never indexed/searched --
+        // see schema() above), so this is pure retrieval payload. Traced
+        // every consumer of AirmailPoi.tags end to end (airmail_wasm's
+        // search_index -> routeman's search.worker.ts -> Autocomplete.tsx's
+        // label()): the only keys ever read back out are `name` and four
+        // `addr:*` fields. Measured on a 200k-doc NYC sample: those keys are
+        // 44% of raw tag bytes; the rest (addr:postcode, nycdoitt:bin,
+        // height, building, wikidata ids, ...) round-trips through the
+        // index, the gzip bundle, and the wasm/JS boundary for zero use
+        // today. Narrowed to what's actually consumed.
+        // EXPERIMENT 2: dropping addr:state specifically -- for a
+        // single-city wasm build it's ~constant (always "NY" for the NYC
+        // build), unlike addr:city, which can genuinely vary within one
+        // city's bbox (distinct values per borough).
+        let stored_tag_keys = ["name", "addr:housenumber", "addr:street", "addr:city"];
         doc.add_object(
             self.schema.get_field(FIELD_TAGS)?,
             poi.tags
                 .iter()
+                .filter(|(k, _)| stored_tag_keys.contains(&k.as_str()))
                 .map(|(k, v)| (k.to_string(), OwnedValue::Str(v.to_string())))
                 .collect::<BTreeMap<String, OwnedValue>>(),
         );

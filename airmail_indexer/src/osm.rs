@@ -100,11 +100,22 @@ impl From<OsmPoi> for Option<ToIndexPoi> {
         let road = poi.tags.get("addr:street").map(ToString::to_string);
         let unit = poi.tags.get("addr:unit").map(ToString::to_string);
 
+        // ADOPTED: `key.contains("name:")` was a naive substring match --
+        // verified against the real NYC extract that it also sweeps in
+        // non-name data riding on a "name:*" key: `name:etymology:wikidata`
+        // (a Wikidata Q-id), `name:pronunciation` (IPA phonetics),
+        // `name:source` (a PDF URL, once even), `name:left`/`name:right`,
+        // etc. -- none of which are alternate names for the place. Of real
+        // name:xx variants, the data carries 170 distinct language/script
+        // codes; narrowed here to English only, matching the WOF admin-name
+        // restriction (see wof.rs) -- a deployment targeting other-language
+        // searchers would want to add those languages back.
+        let is_name_variant_key = |key: &str| key == "name" || key == "name:en";
         let names = {
             let mut names = Vec::new();
             poi.tags
                 .iter()
-                .filter(|(key, _value)| key.contains("name:") || *key == "name")
+                .filter(|(key, _value)| is_name_variant_key(key))
                 .for_each(|(_key, value)| {
                     names.push(value.to_string());
                     // TODO: Remove once we get stemmers again.
