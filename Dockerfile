@@ -1,4 +1,4 @@
-FROM rust:1.81 as build
+FROM rust:1.86 as build
 
 RUN apt update && apt install -y libssl-dev clang pkg-config
 
@@ -6,6 +6,7 @@ WORKDIR /usr/src/airmail
 COPY ./airmail ./airmail
 COPY ./airmail_indexer ./airmail_indexer
 COPY ./airmail_service ./airmail_service
+COPY ./airmail_wasm ./airmail_wasm
 COPY ./Cargo.toml ./Cargo.toml
 COPY ./Cargo.lock ./Cargo.lock
 

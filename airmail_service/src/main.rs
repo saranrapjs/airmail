@@ -45,7 +45,17 @@ async fn main() -> Result<()> {
 
     debug!("Loading index from {}", args.index);
     let index = if args.index.starts_with("http") {
-        Arc::new(AirmailIndex::new_remote(&args.index)?)
+        #[cfg(target_os = "linux")]
+        {
+            Arc::new(AirmailIndex::new_remote(&args.index)?)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            anyhow::bail!(
+                "remote (http) indexes require the tantivy-uffd/userfaultfd-based \
+                 AirmailIndex::new_remote, which only builds on Linux (see airmail/Cargo.toml)"
+            );
+        }
     } else {
         Arc::new(AirmailIndex::new(&args.index)?)
     };

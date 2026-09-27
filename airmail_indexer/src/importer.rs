@@ -1,11 +1,12 @@
 use airmail::{
     index::AirmailIndex,
+    language::Language,
     poi::{SchemafiedPoi, ToIndexPoi},
 };
 use anyhow::Result;
 use crossbeam::channel::{Receiver, Sender};
 use futures_util::future::join_all;
-use lingua::{IsoCode639_3, Language};
+use lingua::IsoCode639_3;
 use log::{info, trace, warn};
 use std::{
     path::{Path, PathBuf},
@@ -217,10 +218,27 @@ impl Importer {
         }
         for lang in pip_response.admin_langs {
             if let Ok(iso) = IsoCode639_3::from_str(&lang) {
-                poi.languages.push(Language::from_iso_code_639_3(&iso))
+                poi.languages.push(airmail_language_from_iso(iso))
             }
         }
 
         Ok(poi)
+    }
+}
+
+/// Maps a lingua ISO code to `airmail::language::Language`, falling back to `Other`.
+fn airmail_language_from_iso(iso: IsoCode639_3) -> Language {
+    match iso {
+        IsoCode639_3::ENG => Language::English,
+        IsoCode639_3::ARA => Language::Arabic,
+        IsoCode639_3::SPA => Language::Spanish,
+        IsoCode639_3::FRA => Language::French,
+        IsoCode639_3::DEU => Language::German,
+        IsoCode639_3::ITA => Language::Italian,
+        IsoCode639_3::POR => Language::Portuguese,
+        IsoCode639_3::RUS => Language::Russian,
+        IsoCode639_3::ZHO => Language::Chinese,
+        IsoCode639_3::CAT => Language::Catalan,
+        _ => Language::Other,
     }
 }

@@ -63,6 +63,10 @@ impl WhosOnFirst {
                     AND place.type != 'marketarea'
                     AND place.type != 'county'
                     AND place.type != 'timezone'
+                    -- No search value, but each added its name to every doc it contains.
+                    AND place.type != 'ocean'
+                    AND place.type != 'continent'
+                    AND place.type != 'empire'
                 )
                 LIMIT 1000
             ",
@@ -88,10 +92,8 @@ impl WhosOnFirst {
                 WHERE name.source = 'wof'
                 AND name.id = ?1
                 AND name.tag IN ('preferred', 'default')
-                AND name.lang IN (
-                    'ara', 'dan', 'deu', 'fra', 'fin', 'hun', 'gre', 'ita', 'nld', 'por',
-                    'rus', 'ron', 'spa', 'eng', 'swe', 'tam', 'tur', 'zho'
-                )
+                -- English only (was 18 languages); add languages your users search in.
+                AND name.lang IN ('eng')
             ",
         )
         .bind(id)

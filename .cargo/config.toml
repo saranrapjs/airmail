@@ -1,0 +1,4 @@
+# Override the workspace's release `debug = 1` for wasm, where debug info only bloats the binary.
+# zstd-sys needs a wasm-capable clang: set CC/AR_wasm32_unknown_unknown in your shell (e.g. Homebrew llvm).
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "debuginfo=0", "-C", "strip=symbols"]

@@ -1,7 +1,7 @@
 use anyhow::Result;
-use lingua::Language;
 use serde::{Deserialize, Serialize};
 
+use crate::language::Language;
 use crate::substitutions::permute_road;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,14 +84,13 @@ impl From<ToIndexPoi> for SchemafiedPoi {
             }
         }
         content.extend(poi.unit);
-        content.extend(poi.admins);
+        // Admin names (borough, locality, ...) aren't indexed (~16.5% smaller). Names
+        // and addresses still match, but a bare neighbourhood query no longer does.
+        let _ = &poi.admins;
 
-        let mut s2cell_parents = Vec::new();
-        let cell = s2::cellid::CellID(poi.s2cell);
-        for level in 0..cell.level() {
-            let cell = cell.parent(level);
-            s2cell_parents.push(cell.0);
-        }
+        // s2cell_parents is only used for bbox queries, which the wasm search never
+        // issues, so it's left empty. Bbox-filtered search won't work on these indexes.
+        let s2cell_parents = Vec::new();
 
         Self {
             content,

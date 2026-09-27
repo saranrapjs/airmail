@@ -16,3 +16,7 @@ perf.data*
 # Suggested paths for data and index
 data/
 index/
+
+# wasm-bindgen output (see BUILD.md)
+airmail_wasm/pkg-node/
+airmail_wasm/pkg/

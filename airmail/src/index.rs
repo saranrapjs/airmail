@@ -1,3 +1,4 @@
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::Arc;
 
@@ -8,9 +9,10 @@ use log::{trace, warn};
 use s2::region::RegionCoverer;
 use std::collections::BTreeMap;
 use tantivy::schema::Value;
+#[cfg(not(target_arch = "wasm32"))]
+use tantivy::directory::MmapDirectory;
 use tantivy::{
     collector::{Count, TopDocs},
-    directory::MmapDirectory,
     query::{
         BooleanQuery, BoostQuery, FuzzyTermQuery, Occur, PhrasePrefixQuery, PhraseQuery, Query,
         TermQuery,
@@ -21,7 +23,9 @@ use tantivy::{
     },
     Searcher, TantivyDocument, Term,
 };
+#[cfg(target_os = "linux")]
 use tantivy_uffd::RemoteDirectory;
+#[cfg(not(target_arch = "wasm32"))]
 use tokio::task::spawn_blocking;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -30,6 +34,26 @@ use crate::{
     poi::{AirmailPoi, SchemafiedPoi},
     query::all_subsequences,
 };
+
+/// Runs a blocking closure on tokio's blocking pool; on wasm32, which has no
+/// threads to offload to, it runs inline.
+#[cfg(not(target_arch = "wasm32"))]
+async fn run_blocking<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    Ok(spawn_blocking(f).await?)
+}
+
+#[cfg(target_arch = "wasm32")]
+#[allow(clippy::unused_async)]
+async fn run_blocking<F, T>(f: F) -> Result<T>
+where
+    F: FnOnce() -> T,
+{
+    Ok(f())
+}
 
 // Field name keys.
 pub const FIELD_CONTENT: &str = "content";
@@ -60,17 +84,22 @@ impl AirmailIndex {
                 .set_tokenizer("raw")
                 .set_index_option(IndexRecordOption::Basic),
         );
+        // `source` is never queried, so it doesn't need positions.
+        let source_options = TextOptions::default().set_indexing_options(
+            TextFieldIndexing::default()
+                .set_fieldnorms(false)
+                .set_index_option(IndexRecordOption::Basic),
+        );
         let s2cell_parent_index_options = NumericOptions::default().set_indexed();
-        let s2cell_index_options = NumericOptions::default()
-            .set_indexed()
-            .set_stored()
-            .set_fast();
+        // s2cell is only read back from the doc store; it was also indexed and
+        // fast, adding millions of unused terms and a duplicate column.
+        let s2cell_index_options = NumericOptions::default().set_stored();
         assert!(!s2cell_parent_index_options.fieldnorms());
         assert!(!s2cell_index_options.fieldnorms());
 
         let _ = schema_builder.add_text_field(FIELD_CONTENT, text_options.clone());
         let _ = schema_builder.add_text_field(FIELD_INDEXED_TAG, tag_options);
-        let _ = schema_builder.add_text_field(FIELD_SOURCE, text_options.clone());
+        let _ = schema_builder.add_text_field(FIELD_SOURCE, source_options);
         let _ = schema_builder.add_u64_field(FIELD_S2CELL, s2cell_index_options);
         let _ = schema_builder.add_u64_field(FIELD_S2CELL_PARENTS, s2cell_parent_index_options);
         let _ = schema_builder.add_json_field(FIELD_TAGS, STORED);
@@ -111,6 +140,7 @@ impl AirmailIndex {
         self.tantivy_index.schema().get_field(FIELD_TAGS).unwrap()
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn create(index_dir: &Path) -> Result<Self> {
         if !index_dir.exists() {
             trace!("Creating index at {:?}", index_dir);
@@ -119,14 +149,39 @@ impl AirmailIndex {
 
         trace!("Opening index at {:?}", index_dir);
         let schema = Self::schema();
-        let tantivy_index =
-            tantivy::Index::open_or_create(MmapDirectory::open(index_dir)?, schema)?;
+        // zstd-19 instead of the lz4 default: ~14% smaller index after gzip (NYC).
+        // Readers need tantivy's "zstd-compression" feature.
+        let settings = tantivy::IndexSettings {
+            docstore_compression: tantivy::store::Compressor::Zstd(
+                tantivy::store::ZstdCompressor {
+                    compression_level: Some(19),
+                },
+            ),
+            // Docs are tiny, so larger blocks (vs. the 16KiB default) let the
+            // compressor dedupe repeated street/city names across docs.
+            docstore_blocksize: 1 << 17,
+            ..Default::default()
+        };
+        let tantivy_index = tantivy::Index::builder()
+            .schema(schema)
+            .settings(settings)
+            .open_or_create(MmapDirectory::open(index_dir)?)?;
         Ok(Self {
             tantivy_index: Arc::new(tantivy_index),
             is_remote: false,
         })
     }
 
+    /// An empty in-memory index; available on wasm32 since it doesn't need mmap.
+    pub fn create_in_ram() -> Result<Self> {
+        let tantivy_index = tantivy::Index::create_in_ram(Self::schema());
+        Ok(Self {
+            tantivy_index: Arc::new(tantivy_index),
+            is_remote: false,
+        })
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new(index_dir: &str) -> Result<Self> {
         let tantivy_index = tantivy::Index::open_in_dir(index_dir)?;
         Ok(Self {
@@ -135,6 +190,16 @@ impl AirmailIndex {
         })
     }
 
+    /// Opens an index from any tantivy `Directory`, e.g. a non-mmap one on wasm32.
+    pub fn open(directory: impl Into<Box<dyn tantivy::Directory>>) -> Result<Self> {
+        let tantivy_index = tantivy::Index::open(directory)?;
+        Ok(Self {
+            tantivy_index: Arc::new(tantivy_index),
+            is_remote: false,
+        })
+    }
+
+    #[cfg(target_os = "linux")]
     pub fn new_remote(base_url: &str) -> Result<Self> {
         let tantivy_index =
             tantivy::Index::open(RemoteDirectory::<{ 2 * 1024 * 1024 }>::new(base_url))?;
@@ -166,14 +231,15 @@ impl AirmailIndex {
 
     pub async fn num_docs(&self) -> Result<u64> {
         let index = self.tantivy_index.clone();
-        let count = spawn_blocking(move || {
+        let count = run_blocking(move || {
             if let Ok(tantivy_reader) = index.reader() {
                 Some(tantivy_reader.searcher().num_docs())
             } else {
                 None
             }
-        });
-        Ok(count.await?.ok_or(AirmailError::UnableToCount)?)
+        })
+        .await?;
+        Ok(count.ok_or(AirmailError::UnableToCount)?)
     }
 
     async fn construct_query(
@@ -214,6 +280,7 @@ impl AirmailIndex {
                 boost *= 3.0;
             }
             if subsequence.len() > 1 {
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.is_remote {
                     let searcher = searcher.clone();
                     let subsequence = subsequence.clone();
@@ -258,6 +325,7 @@ impl AirmailIndex {
                 } else {
                     FuzzyTermQuery::new(term, 1, true)
                 };
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.is_remote {
                     let searcher = searcher.clone();
                     let query = query.clone();
@@ -273,6 +341,7 @@ impl AirmailIndex {
                     } else {
                         Box::new(FuzzyTermQuery::new_prefix(term, 0, false))
                     };
+                #[cfg(not(target_arch = "wasm32"))]
                 if self.is_remote {
                     let searcher = searcher.clone();
                     let query = query.box_clone();
@@ -350,6 +419,8 @@ impl AirmailIndex {
         let searcher = tantivy_reader.searcher();
         let query_string = query.trim().replace("'s", "s");
 
+        // Instant::now() panics on wasm32-unknown-unknown.
+        #[cfg(not(target_arch = "wasm32"))]
         let start = std::time::Instant::now();
 
         let query = self
@@ -367,7 +438,7 @@ impl AirmailIndex {
         trace!("Search query: {:?}", &query);
 
         // Perform the search and then resolve the returned documents
-        let top_docs: Result<Vec<(f32, TantivyDocument)>> = spawn_blocking(move || {
+        let top_docs: Result<Vec<(f32, TantivyDocument)>> = run_blocking(move || {
             let doc_addresses = searcher.search(&query, &TopDocs::with_limit(10))?;
             let mut docs = vec![];
             for (score, doc_address) in doc_addresses {
@@ -385,6 +456,7 @@ impl AirmailIndex {
             e
         })?;
 
+        #[cfg(not(target_arch = "wasm32"))]
         trace!(
             "Search took {:?} and yielded {} results",
             start.elapsed(),
@@ -432,7 +504,9 @@ impl AirmailIndexWriter {
         for content in poi.content {
             self.process_field(&mut doc, &content);
         }
-        doc.add_text(self.schema.get_field(FIELD_SOURCE)?, source);
+        // `source` is neither queried nor stored, so writing it only produced a
+        // postings list covering every doc. The field stays in the schema, unpopulated.
+        let _ = source;
 
         let indexed_keys = [
             "natural", "amenity", "shop", "leisure", "tourism", "historic", "cuisine",
@@ -450,10 +524,14 @@ impl AirmailIndexWriter {
                 );
             }
         }
+        // Store only the tags needed to label a result (~44% of tag bytes on NYC).
+        // addr:state is omitted since it's constant within a single-city index.
+        let stored_tag_keys = ["name", "addr:housenumber", "addr:street", "addr:city"];
         doc.add_object(
             self.schema.get_field(FIELD_TAGS)?,
             poi.tags
                 .iter()
+                .filter(|(k, _)| stored_tag_keys.contains(&k.as_str()))
                 .map(|(k, v)| (k.to_string(), OwnedValue::Str(v.to_string())))
                 .collect::<BTreeMap<String, OwnedValue>>(),
         );

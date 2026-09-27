@@ -100,11 +100,14 @@ impl From<OsmPoi> for Option<ToIndexPoi> {
         let road = poi.tags.get("addr:street").map(ToString::to_string);
         let unit = poi.tags.get("addr:unit").map(ToString::to_string);
 
+        // English names only, matching wof.rs. Matching any "name:" key also
+        // picked up non-names like name:etymology:wikidata and name:pronunciation.
+        let is_name_variant_key = |key: &str| key == "name" || key == "name:en";
         let names = {
             let mut names = Vec::new();
             poi.tags
                 .iter()
-                .filter(|(key, _value)| key.contains("name:") || *key == "name")
+                .filter(|(key, _value)| is_name_variant_key(key))
                 .for_each(|(_key, value)| {
                     names.push(value.to_string());
                     // TODO: Remove once we get stemmers again.

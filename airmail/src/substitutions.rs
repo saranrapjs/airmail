@@ -1,6 +1,6 @@
 use std::{collections::HashMap, error::Error};
 
-use lingua::Language;
+use crate::language::Language;
 use regex::Regex;
 
 lazy_static! {
@@ -116,7 +116,7 @@ pub fn permute_road(road: &str, language: &Language) -> Result<Vec<String>, Box<
         Language::Russian => &RU_STREET_TYPES,
         Language::Chinese => &ZH_STREET_TYPES,
         Language::Catalan => &CA_STREET_TYPES,
-        _ => &EMPTY_SUBS,
+        Language::Other => &EMPTY_SUBS,
     };
     let road_tokens: Vec<String> = sanitize(road)
         .split_ascii_whitespace()
@@ -127,8 +127,7 @@ pub fn permute_road(road: &str, language: &Language) -> Result<Vec<String>, Box<
 
 #[cfg(test)]
 mod test {
-    use lingua::Language;
-
+    use crate::language::Language;
     use crate::substitutions::permute_road;
 
     #[test]
